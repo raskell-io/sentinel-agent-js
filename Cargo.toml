@@ -13,6 +13,10 @@ keywords = ["proxy", "reverse-proxy", "agent", "javascript", "scripting"]
 categories = ["network-programming"]
 readme = "README.md"
 
+[lib]
+name = "sentinel_agent_js"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sentinel-js-agent"
 path = "src/main.rs"
