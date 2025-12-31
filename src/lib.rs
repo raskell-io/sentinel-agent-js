@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use sentinel_agent_protocol::{
-    AgentHandler, AgentResponse, AuditMetadata, HeaderOp, RequestHeadersEvent,
-    ResponseHeadersEvent,
+    AgentHandler, AgentResponse, AuditMetadata, HeaderOp, RequestHeadersEvent, ResponseHeadersEvent,
 };
 
 /// Result from JavaScript script execution

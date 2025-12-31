@@ -13,11 +13,15 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 /// Helper to start a JS agent server with given script and return the socket path
-async fn start_test_server(script: &str, fail_open: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+async fn start_test_server(
+    script: &str,
+    fail_open: bool,
+) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempdir().expect("Failed to create temp dir");
     let socket_path = dir.path().join("js-test.sock");
 
-    let agent = JsAgent::from_source(script.to_string(), fail_open).expect("Failed to create agent");
+    let agent =
+        JsAgent::from_source(script.to_string(), fail_open).expect("Failed to create agent");
     let server = AgentServer::new("test-js", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
@@ -182,7 +186,10 @@ async fn test_redirect_decision() {
         .await
         .expect("Failed to send event");
 
-    assert!(is_block(&response.decision), "Expected Block decision for redirect");
+    assert!(
+        is_block(&response.decision),
+        "Expected Block decision for redirect"
+    );
     assert_eq!(get_block_status(&response.decision), Some(302));
 
     let has_location = response.response_headers.iter().any(|h| match h {
@@ -237,7 +244,10 @@ async fn test_uri_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_block(&response.decision), "Expected admin path to be blocked");
+    assert!(
+        is_block(&response.decision),
+        "Expected admin path to be blocked"
+    );
 
     // Should allow other paths
     let event = make_request_headers("GET", "/api/users", HashMap::new());
@@ -245,7 +255,10 @@ async fn test_uri_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected non-admin path to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected non-admin path to be allowed"
+    );
 }
 
 #[tokio::test]
@@ -268,7 +281,10 @@ async fn test_method_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_block(&response.decision), "Expected DELETE to be blocked");
+    assert!(
+        is_block(&response.decision),
+        "Expected DELETE to be blocked"
+    );
     assert_eq!(get_block_status(&response.decision), Some(405));
 
     // Should allow GET
@@ -304,7 +320,10 @@ async fn test_header_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_block(&response.decision), "Expected BadBot to be blocked");
+    assert!(
+        is_block(&response.decision),
+        "Expected BadBot to be blocked"
+    );
 
     // Should allow good user agent
     let mut headers = HashMap::new();
@@ -315,7 +334,10 @@ async fn test_header_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected Mozilla to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected Mozilla to be allowed"
+    );
 }
 
 #[tokio::test]
@@ -338,7 +360,10 @@ async fn test_client_ip_inspection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected 192.168.x to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected 192.168.x to be allowed"
+    );
 }
 
 // ============================================================================
@@ -626,7 +651,10 @@ async fn test_undefined_function_allows() {
         .await
         .expect("Failed to send event");
 
-    assert!(is_allow(&response.decision), "Expected Allow when function undefined");
+    assert!(
+        is_allow(&response.decision),
+        "Expected Allow when function undefined"
+    );
 }
 
 #[tokio::test]
@@ -646,7 +674,10 @@ async fn test_null_return_allows() {
         .await
         .expect("Failed to send event");
 
-    assert!(is_allow(&response.decision), "Expected Allow for null return");
+    assert!(
+        is_allow(&response.decision),
+        "Expected Allow for null return"
+    );
 }
 
 #[tokio::test]
@@ -666,7 +697,10 @@ async fn test_script_error_blocks_by_default() {
         .await
         .expect("Failed to send event");
 
-    assert!(is_block(&response.decision), "Expected Block on script error");
+    assert!(
+        is_block(&response.decision),
+        "Expected Block on script error"
+    );
     assert_eq!(get_block_status(&response.decision), Some(500));
 }
 
@@ -687,7 +721,10 @@ async fn test_script_error_allows_with_fail_open() {
         .await
         .expect("Failed to send event");
 
-    assert!(is_allow(&response.decision), "Expected Allow with fail-open");
+    assert!(
+        is_allow(&response.decision),
+        "Expected Allow with fail-open"
+    );
 
     assert!(response.audit.tags.contains(&"js-error".to_string()));
     assert!(response.audit.tags.contains(&"fail-open".to_string()));
@@ -791,7 +828,10 @@ async fn test_authentication_required() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected public path to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected public path to be allowed"
+    );
 
     // Health endpoint - should allow without auth
     let event = make_request_headers("GET", "/health", HashMap::new());
@@ -799,7 +839,10 @@ async fn test_authentication_required() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected health to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected health to be allowed"
+    );
 
     // Protected path without auth - should block
     let event = make_request_headers("GET", "/api/users", HashMap::new());
@@ -807,18 +850,27 @@ async fn test_authentication_required() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_block(&response.decision), "Expected protected path to be blocked without auth");
+    assert!(
+        is_block(&response.decision),
+        "Expected protected path to be blocked without auth"
+    );
     assert_eq!(get_block_status(&response.decision), Some(401));
 
     // Protected path with auth - should allow
     let mut headers = HashMap::new();
-    headers.insert("Authorization".to_string(), vec!["Bearer token123".to_string()]);
+    headers.insert(
+        "Authorization".to_string(),
+        vec!["Bearer token123".to_string()],
+    );
     let event = make_request_headers("GET", "/api/users", headers);
     let response = client
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected protected path with auth to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected protected path with auth to be allowed"
+    );
 }
 
 #[tokio::test]
@@ -852,7 +904,10 @@ async fn test_scanner_detection() {
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_block(&response.decision), "Expected sqlmap to be blocked");
+    assert!(
+        is_block(&response.decision),
+        "Expected sqlmap to be blocked"
+    );
 
     // Nikto should be blocked
     let mut headers = HashMap::new();
@@ -866,13 +921,19 @@ async fn test_scanner_detection() {
 
     // Normal browser should be allowed
     let mut headers = HashMap::new();
-    headers.insert("User-Agent".to_string(), vec!["Mozilla/5.0 Chrome/100".to_string()]);
+    headers.insert(
+        "User-Agent".to_string(),
+        vec!["Mozilla/5.0 Chrome/100".to_string()],
+    );
     let event = make_request_headers("GET", "/api", headers);
     let response = client
         .send_event(EventType::RequestHeaders, &event)
         .await
         .expect("Failed to send event");
-    assert!(is_allow(&response.decision), "Expected normal browser to be allowed");
+    assert!(
+        is_allow(&response.decision),
+        "Expected normal browser to be allowed"
+    );
 }
 
 #[tokio::test]
@@ -902,7 +963,10 @@ async fn test_security_headers_for_html() {
 
     // HTML response should get security headers
     let mut headers = HashMap::new();
-    headers.insert("Content-Type".to_string(), vec!["text/html; charset=utf-8".to_string()]);
+    headers.insert(
+        "Content-Type".to_string(),
+        vec!["text/html; charset=utf-8".to_string()],
+    );
     let event = make_response_headers(200, headers);
     let response = client
         .send_event(EventType::ResponseHeaders, &event)
@@ -914,7 +978,10 @@ async fn test_security_headers_for_html() {
 
     // JSON response should not get security headers
     let mut headers = HashMap::new();
-    headers.insert("Content-Type".to_string(), vec!["application/json".to_string()]);
+    headers.insert(
+        "Content-Type".to_string(),
+        vec!["application/json".to_string()],
+    );
     let event = make_response_headers(200, headers);
     let response = client
         .send_event(EventType::ResponseHeaders, &event)
