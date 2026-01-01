@@ -11,12 +11,24 @@ use rquickjs::{Context as JsContext, Function, Object, Runtime, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use sentinel_agent_protocol::{
-    AgentHandler, AgentResponse, AuditMetadata, HeaderOp, RequestHeadersEvent, ResponseHeadersEvent,
+    AgentHandler, AgentResponse, AuditMetadata, ConfigureEvent, HeaderOp, RequestHeadersEvent,
+    ResponseHeadersEvent,
 };
+
+/// Agent configuration from the proxy
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct JsConfigJson {
+    /// Inline script content
+    pub script: Option<String>,
+    /// Whether to fail open on errors
+    #[serde(default)]
+    pub fail_open: bool,
+}
 
 /// Result from JavaScript script execution
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,14 +72,14 @@ pub struct JsResponse {
 /// JavaScript scripting agent
 pub struct JsAgent {
     /// JavaScript runtime
-    runtime: Arc<Mutex<Runtime>>,
-    /// Script content
-    script_content: String,
-    /// Whether to fail open on errors
-    fail_open: bool,
+    runtime: Arc<RwLock<Runtime>>,
+    /// Script content (can be reconfigured)
+    script_content: RwLock<String>,
+    /// Whether to fail open on errors (can be reconfigured)
+    fail_open: RwLock<bool>,
 }
 
-// Safety: We protect the runtime with a Mutex
+// Safety: We protect the runtime with an RwLock
 unsafe impl Send for JsAgent {}
 unsafe impl Sync for JsAgent {}
 
@@ -87,10 +99,34 @@ impl JsAgent {
         info!("JavaScript agent initialized");
 
         Ok(Self {
-            runtime: Arc::new(Mutex::new(runtime)),
-            script_content,
-            fail_open,
+            runtime: Arc::new(RwLock::new(runtime)),
+            script_content: RwLock::new(script_content),
+            fail_open: RwLock::new(fail_open),
         })
+    }
+
+    /// Reconfigure the agent with new settings
+    ///
+    /// This allows dynamic reconfiguration without restarting the agent.
+    pub fn reconfigure(&self, config: JsConfigJson) -> Result<()> {
+        if let Some(script) = config.script {
+            let mut script_content = self
+                .script_content
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            *script_content = script;
+            info!("JavaScript agent script reconfigured");
+        }
+
+        {
+            let mut fail_open = self
+                .fail_open
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            *fail_open = config.fail_open;
+        }
+
+        Ok(())
     }
 
     /// Convert serde_json::Value to QuickJS Value
@@ -177,7 +213,12 @@ impl JsAgent {
     ) -> Result<Option<ScriptResult>> {
         let runtime = self
             .runtime
-            .lock()
+            .read()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        let script_content = self
+            .script_content
+            .read()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
         let ctx = JsContext::full(&runtime).context("Failed to create JS context")?;
@@ -208,7 +249,7 @@ impl JsAgent {
             globals.set("console", console)?;
 
             // Execute the script to define functions
-            ctx.eval::<(), _>(self.script_content.as_str())?;
+            ctx.eval::<(), _>(script_content.as_str())?;
 
             // Check if function exists
             let func: Option<Function> = globals.get(fn_name).ok();
@@ -316,7 +357,9 @@ impl JsAgent {
             "Script execution failed"
         );
 
-        if self.fail_open {
+        let fail_open = self.fail_open.read().map(|f| *f).unwrap_or(false);
+
+        if fail_open {
             AgentResponse::default_allow().with_audit(AuditMetadata {
                 tags: vec!["js-error".to_string(), "fail-open".to_string()],
                 reason_codes: vec![error.to_string()],
@@ -334,6 +377,34 @@ impl JsAgent {
 
 #[async_trait]
 impl AgentHandler for JsAgent {
+    async fn on_configure(&self, event: ConfigureEvent) -> AgentResponse {
+        info!(agent_id = %event.agent_id, "Received configuration event");
+
+        // Parse the configuration
+        let config: JsConfigJson = match serde_json::from_value(event.config) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "Failed to parse agent configuration");
+                return AgentResponse::block(
+                    500,
+                    Some(format!("Invalid configuration: {}", e)),
+                );
+            }
+        };
+
+        // Apply the configuration
+        if let Err(e) = self.reconfigure(config) {
+            error!(error = %e, "Failed to apply configuration");
+            return AgentResponse::block(
+                500,
+                Some(format!("Configuration error: {}", e)),
+            );
+        }
+
+        info!("JavaScript agent configured successfully");
+        AgentResponse::default_allow()
+    }
+
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
         let correlation_id = event.metadata.correlation_id.clone();
 
