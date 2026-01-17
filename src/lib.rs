@@ -11,12 +11,16 @@ use rquickjs::{Context as JsContext, Function, Object, Runtime, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 
+use sentinel_agent_protocol::v2::{
+    AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, CounterMetric, DrainReason,
+    GaugeMetric, HealthStatus, MetricsReport, ShutdownReason,
+};
 use sentinel_agent_protocol::{
-    AgentHandler, AgentResponse, AuditMetadata, ConfigureEvent, HeaderOp, RequestHeadersEvent,
-    ResponseHeadersEvent,
+    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestHeadersEvent, ResponseHeadersEvent,
 };
 
 /// Agent configuration from the proxy
@@ -77,6 +81,14 @@ pub struct JsAgent {
     script_content: RwLock<String>,
     /// Whether to fail open on errors (can be reconfigured)
     fail_open: RwLock<bool>,
+    /// Whether the agent is draining (not accepting new requests)
+    draining: RwLock<bool>,
+    /// Metrics: total requests processed
+    requests_total: AtomicU64,
+    /// Metrics: total requests blocked
+    requests_blocked: AtomicU64,
+    /// Metrics: total script errors
+    script_errors: AtomicU64,
 }
 
 // Safety: We protect the runtime with an RwLock
@@ -102,7 +114,16 @@ impl JsAgent {
             runtime: Arc::new(RwLock::new(runtime)),
             script_content: RwLock::new(script_content),
             fail_open: RwLock::new(fail_open),
+            draining: RwLock::new(false),
+            requests_total: AtomicU64::new(0),
+            requests_blocked: AtomicU64::new(0),
+            script_errors: AtomicU64::new(0),
         })
+    }
+
+    /// Check if agent is draining.
+    pub fn is_draining(&self) -> bool {
+        *self.draining.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Reconfigure the agent with new settings
@@ -357,6 +378,8 @@ impl JsAgent {
             "Script execution failed"
         );
 
+        self.script_errors.fetch_add(1, Ordering::Relaxed);
+
         let fail_open = self.fail_open.read().map(|f| *f).unwrap_or(false);
 
         if fail_open {
@@ -366,6 +389,7 @@ impl JsAgent {
                 ..Default::default()
             })
         } else {
+            self.requests_blocked.fetch_add(1, Ordering::Relaxed);
             AgentResponse::block(500, Some("Script Error".to_string())).with_audit(AuditMetadata {
                 tags: vec!["js-error".to_string()],
                 reason_codes: vec![error.to_string()],
@@ -376,36 +400,72 @@ impl JsAgent {
 }
 
 #[async_trait]
-impl AgentHandler for JsAgent {
-    async fn on_configure(&self, event: ConfigureEvent) -> AgentResponse {
-        info!(agent_id = %event.agent_id, "Received configuration event");
+impl AgentHandlerV2 for JsAgent {
+    /// Return agent capabilities for v2 protocol.
+    fn capabilities(&self) -> AgentCapabilities {
+        AgentCapabilities::new(
+            "sentinel-js-agent",
+            "JavaScript Scripting Agent",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_event(EventType::RequestHeaders)
+        .with_event(EventType::ResponseHeaders)
+        .with_features(AgentFeatures {
+            streaming_body: false,
+            websocket: false,
+            guardrails: false,
+            config_push: true,
+            metrics_export: true,
+            concurrent_requests: 100,
+            cancellation: true,
+            flow_control: false,
+            health_reporting: true,
+        })
+        .with_limits(AgentLimits {
+            max_body_size: 10 * 1024 * 1024, // 10MB
+            max_concurrency: 100,
+            preferred_chunk_size: 64 * 1024, // 64KB
+            max_memory: None,
+            max_processing_time_ms: Some(5000),
+        })
+    }
+
+    /// Handle configuration updates from the proxy.
+    async fn on_configure(&self, config: serde_json::Value, version: Option<String>) -> bool {
+        info!(
+            config_version = ?version,
+            "Received configuration update"
+        );
 
         // Parse the configuration
-        let config: JsConfigJson = match serde_json::from_value(event.config) {
+        let js_config: JsConfigJson = match serde_json::from_value(config) {
             Ok(c) => c,
             Err(e) => {
                 error!(error = %e, "Failed to parse agent configuration");
-                return AgentResponse::block(
-                    500,
-                    Some(format!("Invalid configuration: {}", e)),
-                );
+                return false;
             }
         };
 
         // Apply the configuration
-        if let Err(e) = self.reconfigure(config) {
+        if let Err(e) = self.reconfigure(js_config) {
             error!(error = %e, "Failed to apply configuration");
-            return AgentResponse::block(
-                500,
-                Some(format!("Configuration error: {}", e)),
-            );
+            return false;
         }
 
         info!("JavaScript agent configured successfully");
-        AgentResponse::default_allow()
+        true
     }
 
+    /// Handle request headers event.
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+
+        // Check if draining
+        if self.is_draining() {
+            debug!("Agent is draining, allowing request");
+            return AgentResponse::default_allow();
+        }
+
         let correlation_id = event.metadata.correlation_id.clone();
 
         // Build request object for JavaScript
@@ -437,7 +497,14 @@ impl AgentHandler for JsAgent {
                     decision = script_result.decision,
                     "Script returned result"
                 );
-                Self::build_response(script_result)
+                let response = Self::build_response(script_result.clone());
+                // Track blocked requests
+                if script_result.decision.to_lowercase() == "block"
+                    || script_result.decision.to_lowercase() == "deny"
+                {
+                    self.requests_blocked.fetch_add(1, Ordering::Relaxed);
+                }
+                response
             }
             Ok(None) => {
                 // Function not defined, allow by default
@@ -447,7 +514,14 @@ impl AgentHandler for JsAgent {
         }
     }
 
+    /// Handle response headers event.
     async fn on_response_headers(&self, event: ResponseHeadersEvent) -> AgentResponse {
+        // Check if draining
+        if self.is_draining() {
+            debug!("Agent is draining, allowing response");
+            return AgentResponse::default_allow();
+        }
+
         let correlation_id = event.correlation_id.clone();
 
         // Build response object for JavaScript
@@ -483,4 +557,88 @@ impl AgentHandler for JsAgent {
             Err(e) => self.handle_error(e, &correlation_id),
         }
     }
+
+    /// Return current health status.
+    fn health_status(&self) -> HealthStatus {
+        let agent_id = "sentinel-js-agent".to_string();
+
+        // If draining, report as draining
+        if self.is_draining() {
+            return HealthStatus {
+                agent_id,
+                state: sentinel_agent_protocol::v2::HealthState::Draining { eta_ms: None },
+                message: Some("Agent is draining".to_string()),
+                load: None,
+                resources: None,
+                valid_until_ms: None,
+                timestamp_ms: now_ms(),
+            };
+        }
+
+        HealthStatus::healthy(agent_id)
+    }
+
+    /// Return metrics report.
+    fn metrics_report(&self) -> Option<MetricsReport> {
+        let mut report = MetricsReport::new("sentinel-js-agent", 10_000);
+
+        report.counters.push(CounterMetric::new(
+            "js_agent_requests_total",
+            self.requests_total.load(Ordering::Relaxed),
+        ));
+
+        report.counters.push(CounterMetric::new(
+            "js_agent_requests_blocked_total",
+            self.requests_blocked.load(Ordering::Relaxed),
+        ));
+
+        report.counters.push(CounterMetric::new(
+            "js_agent_script_errors_total",
+            self.script_errors.load(Ordering::Relaxed),
+        ));
+
+        // Add gauge for draining state
+        let draining_value = if self.is_draining() { 1.0 } else { 0.0 };
+        report
+            .gauges
+            .push(GaugeMetric::new("js_agent_draining", draining_value));
+
+        Some(report)
+    }
+
+    /// Handle shutdown request.
+    async fn on_shutdown(&self, reason: ShutdownReason, grace_period_ms: u64) {
+        info!(
+            reason = ?reason,
+            grace_period_ms = grace_period_ms,
+            "Received shutdown request"
+        );
+
+        // Set draining to stop accepting new requests
+        if let Ok(mut draining) = self.draining.write() {
+            *draining = true;
+        }
+    }
+
+    /// Handle drain request.
+    async fn on_drain(&self, duration_ms: u64, reason: DrainReason) {
+        info!(
+            duration_ms = duration_ms,
+            reason = ?reason,
+            "Received drain request"
+        );
+
+        // Set draining flag
+        if let Ok(mut draining) = self.draining.write() {
+            *draining = true;
+        }
+    }
+}
+
+/// Get current time in milliseconds since Unix epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

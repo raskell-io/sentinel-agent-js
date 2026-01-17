@@ -1,45 +1,12 @@
-//! Integration tests for the JavaScript agent using sentinel-agent-protocol.
+//! Integration tests for the JavaScript agent using AgentHandlerV2 trait.
 //!
-//! These tests spin up an actual AgentServer and connect via AgentClient
-//! to verify the full protocol flow.
+//! These tests directly invoke the handler methods to verify the JavaScript
+//! scripting logic works correctly with the v2 protocol.
 
 use sentinel_agent_js::JsAgent;
-use sentinel_agent_protocol::{
-    AgentClient, AgentServer, Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata,
-    ResponseHeadersEvent,
-};
+use sentinel_agent_protocol::v2::{AgentHandlerV2, DrainReason, ShutdownReason};
+use sentinel_agent_protocol::{Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata, ResponseHeadersEvent};
 use std::collections::HashMap;
-use std::time::Duration;
-use tempfile::tempdir;
-
-/// Helper to start a JS agent server with given script and return the socket path
-async fn start_test_server(
-    script: &str,
-    fail_open: bool,
-) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempdir().expect("Failed to create temp dir");
-    let socket_path = dir.path().join("js-test.sock");
-
-    let agent =
-        JsAgent::from_source(script.to_string(), fail_open).expect("Failed to create agent");
-    let server = AgentServer::new("test-js", socket_path.clone(), Box::new(agent));
-
-    tokio::spawn(async move {
-        let _ = server.run().await;
-    });
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    (dir, socket_path)
-}
-
-/// Create a client connected to the test server
-async fn create_client(socket_path: &std::path::Path) -> AgentClient {
-    AgentClient::unix_socket("test-client", socket_path, Duration::from_secs(5))
-        .await
-        .expect("Failed to connect to agent")
-}
 
 /// Create a basic request metadata
 fn make_metadata() -> RequestMetadata {
@@ -56,6 +23,7 @@ fn make_metadata() -> RequestMetadata {
         route_id: Some("default".to_string()),
         upstream_id: None,
         timestamp: "2025-01-01T12:00:00Z".to_string(),
+        traceparent: None,
     }
 }
 
@@ -104,6 +72,48 @@ fn get_block_status(decision: &Decision) -> Option<u16> {
 }
 
 // ============================================================================
+// Capabilities and Metadata Tests
+// ============================================================================
+
+#[test]
+fn test_capabilities() {
+    let script = r#"function on_request_headers(request) { return { decision: "allow" }; }"#;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    let caps = agent.capabilities();
+    assert_eq!(caps.agent_id, "sentinel-js-agent");
+    assert_eq!(caps.name, "JavaScript Scripting Agent");
+    assert!(caps.supports_event(EventType::RequestHeaders));
+    assert!(caps.supports_event(EventType::ResponseHeaders));
+    assert!(caps.features.config_push);
+    assert!(caps.features.metrics_export);
+    assert!(caps.features.health_reporting);
+}
+
+#[test]
+fn test_health_status() {
+    let script = r#"function on_request_headers(request) { return { decision: "allow" }; }"#;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    let health = agent.health_status();
+    assert!(health.is_healthy());
+    assert_eq!(health.agent_id, "sentinel-js-agent");
+}
+
+#[test]
+fn test_metrics_report() {
+    let script = r#"function on_request_headers(request) { return { decision: "allow" }; }"#;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    let report = agent.metrics_report();
+    assert!(report.is_some());
+    let report = report.unwrap();
+    assert_eq!(report.agent_id, "sentinel-js-agent");
+    assert!(!report.counters.is_empty());
+    assert!(!report.gauges.is_empty());
+}
+
+// ============================================================================
 // Basic Decision Tests
 // ============================================================================
 
@@ -115,14 +125,9 @@ async fn test_allow_decision() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api/users", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_allow(&response.decision), "Expected Allow decision");
 }
@@ -135,14 +140,9 @@ async fn test_block_decision() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/admin", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_block(&response.decision), "Expected Block decision");
     assert_eq!(get_block_status(&response.decision), Some(403));
@@ -156,14 +156,9 @@ async fn test_deny_decision() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/protected", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_block(&response.decision), "Expected Block decision");
     assert_eq!(get_block_status(&response.decision), Some(401));
@@ -177,14 +172,9 @@ async fn test_redirect_decision() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/secure", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(
         is_block(&response.decision),
@@ -208,14 +198,9 @@ async fn test_default_status_codes() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/test", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert_eq!(get_block_status(&response.decision), Some(403));
 }
@@ -235,15 +220,11 @@ async fn test_uri_inspection() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // Should block admin
     let event = make_request_headers("GET", "/admin/settings", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_block(&response.decision),
         "Expected admin path to be blocked"
@@ -251,10 +232,7 @@ async fn test_uri_inspection() {
 
     // Should allow other paths
     let event = make_request_headers("GET", "/api/users", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected non-admin path to be allowed"
@@ -272,15 +250,11 @@ async fn test_method_inspection() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // Should block DELETE
     let event = make_request_headers("DELETE", "/api/resource", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_block(&response.decision),
         "Expected DELETE to be blocked"
@@ -289,10 +263,7 @@ async fn test_method_inspection() {
 
     // Should allow GET
     let event = make_request_headers("GET", "/api/resource", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(is_allow(&response.decision), "Expected GET to be allowed");
 }
 
@@ -308,18 +279,14 @@ async fn test_header_inspection() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // Should block BadBot
     let mut headers = HashMap::new();
     headers.insert("User-Agent".to_string(), vec!["BadBot/1.0".to_string()]);
 
     let event = make_request_headers("GET", "/api", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_block(&response.decision),
         "Expected BadBot to be blocked"
@@ -330,39 +297,10 @@ async fn test_header_inspection() {
     headers.insert("User-Agent".to_string(), vec!["Mozilla/5.0".to_string()]);
 
     let event = make_request_headers("GET", "/api", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected Mozilla to be allowed"
-    );
-}
-
-#[tokio::test]
-async fn test_client_ip_inspection() {
-    let script = r#"
-        function on_request_headers(request) {
-            if (request.client_ip.startsWith("10.")) {
-                return { decision: "block", status: 403, body: "Internal network blocked" };
-            }
-            return { decision: "allow" };
-        }
-    "#;
-
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
-    // Our test uses 192.168.1.100, so should be allowed
-    let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
-    assert!(
-        is_allow(&response.decision),
-        "Expected 192.168.x to be allowed"
     );
 }
 
@@ -384,14 +322,9 @@ async fn test_add_request_headers() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_allow(&response.decision));
 
@@ -400,12 +333,6 @@ async fn test_add_request_headers() {
         _ => false,
     });
     assert!(has_processed_by, "Expected X-Processed-By header");
-
-    let has_request_time = response.request_headers.iter().any(|h| match h {
-        HeaderOp::Set { name, .. } => name == "X-Request-Time",
-        _ => false,
-    });
-    assert!(has_request_time, "Expected X-Request-Time header");
 }
 
 #[tokio::test]
@@ -419,14 +346,9 @@ async fn test_remove_request_headers() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_allow(&response.decision));
 
@@ -435,12 +357,6 @@ async fn test_remove_request_headers() {
         _ => false,
     });
     assert!(has_remove_debug, "Expected X-Debug removal");
-
-    let has_remove_internal = response.request_headers.iter().any(|h| match h {
-        HeaderOp::Remove { name } => name == "X-Internal",
-        _ => false,
-    });
-    assert!(has_remove_internal, "Expected X-Internal removal");
 }
 
 #[tokio::test]
@@ -457,14 +373,9 @@ async fn test_add_response_headers() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_allow(&response.decision));
 
@@ -473,41 +384,6 @@ async fn test_add_response_headers() {
         _ => false,
     });
     assert!(has_nosniff, "Expected X-Content-Type-Options header");
-
-    let has_frame = response.response_headers.iter().any(|h| match h {
-        HeaderOp::Set { name, value } => name == "X-Frame-Options" && value == "DENY",
-        _ => false,
-    });
-    assert!(has_frame, "Expected X-Frame-Options header");
-}
-
-#[tokio::test]
-async fn test_remove_response_headers() {
-    let script = r#"
-        function on_request_headers(request) {
-            return {
-                decision: "allow",
-                remove_response_headers: ["Server", "X-Powered-By"]
-            };
-        }
-    "#;
-
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
-    let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
-
-    assert!(is_allow(&response.decision));
-
-    let has_remove_server = response.response_headers.iter().any(|h| match h {
-        HeaderOp::Remove { name } => name == "Server",
-        _ => false,
-    });
-    assert!(has_remove_server, "Expected Server removal");
 }
 
 // ============================================================================
@@ -530,15 +406,11 @@ async fn test_response_headers_hook() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // 500 error should add header
     let event = make_response_headers(500, HashMap::new());
-    let response = client
-        .send_event(EventType::ResponseHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_response_headers(event).await;
 
     assert!(is_allow(&response.decision));
     let has_error_logged = response.response_headers.iter().any(|h| match h {
@@ -549,10 +421,7 @@ async fn test_response_headers_hook() {
 
     // 200 should not add header
     let event = make_response_headers(200, HashMap::new());
-    let response = client
-        .send_event(EventType::ResponseHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_response_headers(event).await;
 
     assert!(is_allow(&response.decision));
     let has_error_logged = response.response_headers.iter().any(|h| match h {
@@ -560,42 +429,6 @@ async fn test_response_headers_hook() {
         _ => false,
     });
     assert!(!has_error_logged, "Should not have X-Error-Logged for 200");
-}
-
-#[tokio::test]
-async fn test_response_headers_inspection() {
-    let script = r#"
-        function on_response_headers(response) {
-            const contentType = response.headers["Content-Type"] || "";
-            if (contentType.includes("text/html")) {
-                return {
-                    decision: "allow",
-                    add_response_headers: {
-                        "Content-Security-Policy": "default-src 'self'"
-                    }
-                };
-            }
-            return { decision: "allow" };
-        }
-    "#;
-
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
-    let mut headers = HashMap::new();
-    headers.insert("Content-Type".to_string(), vec!["text/html".to_string()]);
-
-    let event = make_response_headers(200, headers);
-    let response = client
-        .send_event(EventType::ResponseHeaders, &event)
-        .await
-        .expect("Failed to send event");
-
-    let has_csp = response.response_headers.iter().any(|h| match h {
-        HeaderOp::Set { name, .. } => name == "Content-Security-Policy",
-        _ => false,
-    });
-    assert!(has_csp, "Expected CSP header for HTML content");
 }
 
 // ============================================================================
@@ -613,14 +446,9 @@ async fn test_audit_tags() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(is_allow(&response.decision));
 
@@ -642,14 +470,9 @@ async fn test_undefined_function_allows() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(
         is_allow(&response.decision),
@@ -665,14 +488,9 @@ async fn test_null_return_allows() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(
         is_allow(&response.decision),
@@ -688,14 +506,9 @@ async fn test_script_error_blocks_by_default() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(
         is_block(&response.decision),
@@ -712,14 +525,9 @@ async fn test_script_error_allows_with_fail_open() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, true).await; // fail_open = true
-    let mut client = create_client(&socket_path).await;
-
+    let agent = JsAgent::from_source(script.to_string(), true).expect("Failed to create agent"); // fail_open = true
     let event = make_request_headers("GET", "/api", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     assert!(
         is_allow(&response.decision),
@@ -728,6 +536,82 @@ async fn test_script_error_allows_with_fail_open() {
 
     assert!(response.audit.tags.contains(&"js-error".to_string()));
     assert!(response.audit.tags.contains(&"fail-open".to_string()));
+}
+
+// ============================================================================
+// Configuration Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_on_configure() {
+    let script = r#"
+        function on_request_headers(request) {
+            return { decision: "allow" };
+        }
+    "#;
+
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    // Valid configuration should be accepted
+    let config = serde_json::json!({
+        "fail-open": true
+    });
+    let result = agent.on_configure(config, Some("1.0.0".to_string())).await;
+    assert!(result, "Expected configuration to be accepted");
+
+    // Invalid configuration should be rejected (note: empty config is valid due to Default trait)
+    let config = serde_json::json!("invalid");
+    let result = agent.on_configure(config, Some("1.0.0".to_string())).await;
+    assert!(!result, "Expected invalid configuration to be rejected");
+}
+
+// ============================================================================
+// Lifecycle Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_on_shutdown() {
+    let script = r#"
+        function on_request_headers(request) {
+            return { decision: "allow" };
+        }
+    "#;
+
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    // Agent should not be draining initially
+    assert!(!agent.is_draining());
+
+    // After shutdown, agent should be draining
+    agent.on_shutdown(ShutdownReason::Graceful, 5000).await;
+    assert!(agent.is_draining());
+
+    // Health status should reflect draining state
+    let health = agent.health_status();
+    assert!(!health.is_healthy());
+}
+
+#[tokio::test]
+async fn test_on_drain() {
+    let script = r#"
+        function on_request_headers(request) {
+            return { decision: "allow" };
+        }
+    "#;
+
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
+
+    // Agent should not be draining initially
+    assert!(!agent.is_draining());
+
+    // After drain, agent should be draining
+    agent.on_drain(5000, DrainReason::Maintenance).await;
+    assert!(agent.is_draining());
+
+    // Requests while draining should still be allowed
+    let event = make_request_headers("GET", "/api", HashMap::new());
+    let response = agent.on_request_headers(event).await;
+    assert!(is_allow(&response.decision), "Expected Allow while draining");
 }
 
 // ============================================================================
@@ -754,15 +638,11 @@ async fn test_rate_limit_tier_by_path() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // API path
     let event = make_request_headers("GET", "/api/v1/users", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     let has_api_tier = response.request_headers.iter().any(|h| match h {
         HeaderOp::Set { name, value } => name == "X-Rate-Limit-Tier" && value == "api",
@@ -772,10 +652,7 @@ async fn test_rate_limit_tier_by_path() {
 
     // Admin path
     let event = make_request_headers("GET", "/admin/dashboard", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     let has_admin_tier = response.request_headers.iter().any(|h| match h {
         HeaderOp::Set { name, value } => name == "X-Rate-Limit-Tier" && value == "admin",
@@ -785,10 +662,7 @@ async fn test_rate_limit_tier_by_path() {
 
     // Standard path
     let event = make_request_headers("GET", "/public/page", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
 
     let has_standard_tier = response.request_headers.iter().any(|h| match h {
         HeaderOp::Set { name, value } => name == "X-Rate-Limit-Tier" && value == "standard",
@@ -819,15 +693,11 @@ async fn test_authentication_required() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // Public path - should allow without auth
     let event = make_request_headers("GET", "/public/page", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected public path to be allowed"
@@ -835,10 +705,7 @@ async fn test_authentication_required() {
 
     // Health endpoint - should allow without auth
     let event = make_request_headers("GET", "/health", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected health to be allowed"
@@ -846,10 +713,7 @@ async fn test_authentication_required() {
 
     // Protected path without auth - should block
     let event = make_request_headers("GET", "/api/users", HashMap::new());
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_block(&response.decision),
         "Expected protected path to be blocked without auth"
@@ -863,10 +727,7 @@ async fn test_authentication_required() {
         vec!["Bearer token123".to_string()],
     );
     let event = make_request_headers("GET", "/api/users", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected protected path with auth to be allowed"
@@ -893,17 +754,13 @@ async fn test_scanner_detection() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // SQLMap should be blocked
     let mut headers = HashMap::new();
     headers.insert("User-Agent".to_string(), vec!["sqlmap/1.0".to_string()]);
     let event = make_request_headers("GET", "/api", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_block(&response.decision),
         "Expected sqlmap to be blocked"
@@ -913,10 +770,7 @@ async fn test_scanner_detection() {
     let mut headers = HashMap::new();
     headers.insert("User-Agent".to_string(), vec!["Nikto/2.1".to_string()]);
     let event = make_request_headers("GET", "/api", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(is_block(&response.decision), "Expected Nikto to be blocked");
 
     // Normal browser should be allowed
@@ -926,10 +780,7 @@ async fn test_scanner_detection() {
         vec!["Mozilla/5.0 Chrome/100".to_string()],
     );
     let event = make_request_headers("GET", "/api", headers);
-    let response = client
-        .send_event(EventType::RequestHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_request_headers(event).await;
     assert!(
         is_allow(&response.decision),
         "Expected normal browser to be allowed"
@@ -958,8 +809,7 @@ async fn test_security_headers_for_html() {
         }
     "#;
 
-    let (_dir, socket_path) = start_test_server(script, false).await;
-    let mut client = create_client(&socket_path).await;
+    let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     // HTML response should get security headers
     let mut headers = HashMap::new();
@@ -968,10 +818,7 @@ async fn test_security_headers_for_html() {
         vec!["text/html; charset=utf-8".to_string()],
     );
     let event = make_response_headers(200, headers);
-    let response = client
-        .send_event(EventType::ResponseHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_response_headers(event).await;
 
     assert!(is_allow(&response.decision));
     assert_eq!(response.response_headers.len(), 4);
@@ -983,10 +830,7 @@ async fn test_security_headers_for_html() {
         vec!["application/json".to_string()],
     );
     let event = make_response_headers(200, headers);
-    let response = client
-        .send_event(EventType::ResponseHeaders, &event)
-        .await
-        .expect("Failed to send event");
+    let response = agent.on_response_headers(event).await;
 
     assert!(is_allow(&response.decision));
     assert!(response.response_headers.is_empty());

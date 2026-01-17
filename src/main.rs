@@ -1,27 +1,31 @@
 //! Sentinel JavaScript Agent CLI
 //!
 //! Command-line interface for the JavaScript scripting agent.
+//!
+//! Supports both UDS (Unix Domain Socket) and gRPC transports for v2 protocol.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
 use sentinel_agent_js::JsAgent;
-use sentinel_agent_protocol::AgentServer;
+use sentinel_agent_protocol::v2::GrpcAgentServerV2;
 
 /// Command line arguments
 #[derive(Parser, Debug)]
 #[command(name = "sentinel-js-agent")]
-#[command(about = "JavaScript scripting agent for Sentinel reverse proxy")]
+#[command(about = "JavaScript scripting agent for Sentinel reverse proxy (v2 protocol)")]
+#[command(version)]
 struct Args {
-    /// Path to Unix socket
-    #[arg(long, default_value = "/tmp/sentinel-js.sock", env = "AGENT_SOCKET")]
-    socket: PathBuf,
-
     /// Path to JavaScript script file
     #[arg(long, env = "JS_SCRIPT")]
     script: PathBuf,
+
+    /// gRPC address to listen on (e.g., "0.0.0.0:50052").
+    /// If not specified, defaults to "0.0.0.0:50052".
+    #[arg(long, env = "GRPC_ADDRESS")]
+    grpc_address: Option<String>,
 
     /// Enable verbose logging
     #[arg(short, long, env = "JS_VERBOSE")]
@@ -48,7 +52,7 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    info!("Starting Sentinel JavaScript Agent");
+    info!("Starting Sentinel JavaScript Agent (v2 protocol)");
 
     // Create agent
     let agent = JsAgent::new(args.script.clone(), args.fail_open)?;
@@ -59,10 +63,28 @@ async fn main() -> Result<()> {
         "Agent configured"
     );
 
-    // Start agent server
-    info!(socket = ?args.socket, "Starting agent server");
-    let server = AgentServer::new("sentinel-js-agent", args.socket, Box::new(agent));
-    server.run().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Determine gRPC address
+    let grpc_addr = args
+        .grpc_address
+        .unwrap_or_else(|| "0.0.0.0:50052".to_string());
+
+    info!(
+        grpc_address = %grpc_addr,
+        "Starting gRPC v2 agent server"
+    );
+
+    let addr = grpc_addr
+        .parse()
+        .context("Invalid gRPC address format (expected host:port)")?;
+
+    let server = GrpcAgentServerV2::new("sentinel-js-agent", Box::new(agent));
+
+    info!("JavaScript agent ready and listening on gRPC");
+
+    server
+        .run(addr)
+        .await
+        .context("Failed to run JavaScript agent gRPC server")?;
 
     Ok(())
 }
