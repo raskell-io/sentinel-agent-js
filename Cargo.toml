@@ -1,30 +1,30 @@
 [package]
-name = "sentinel-agent-js"
+name = "zentinel-agent-js"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
-authors = ["Sentinel Contributors"]
+authors = ["Zentinel Contributors"]
 license = "Apache-2.0"
-repository = "https://github.com/raskell-io/sentinel-agent-js"
-homepage = "https://sentinel.raskell.io"
-documentation = "https://sentinel.raskell.io/docs/agents/js"
-description = "JavaScript scripting agent for Sentinel reverse proxy - embed custom JS logic"
+repository = "https://github.com/zentinelproxy/zentinel-agent-js"
+homepage = "https://zentinelproxy.io"
+documentation = "https://zentinelproxy.io/docs/agents/js"
+description = "JavaScript scripting agent for Zentinel reverse proxy - embed custom JS logic"
 keywords = ["proxy", "reverse-proxy", "agent", "javascript", "scripting"]
 categories = ["network-programming"]
 readme = "README.md"
 
 [lib]
-name = "sentinel_agent_js"
+name = "zentinel_agent_js"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sentinel-js-agent"
+name = "zentinel-js-agent"
 path = "src/main.rs"
 
 [dependencies]
-# Sentinel protocol
-sentinel-agent-protocol = "0.3"
-sentinel-common = "0.3"
+# Zentinel protocol
+zentinel-agent-protocol = "0.3"
+zentinel-common = "0.3"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }

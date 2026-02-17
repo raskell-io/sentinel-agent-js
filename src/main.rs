@@ -1,4 +1,4 @@
-//! Sentinel JavaScript Agent CLI
+//! Zentinel JavaScript Agent CLI
 //!
 //! Command-line interface for the JavaScript scripting agent.
 //!
@@ -9,13 +9,13 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
-use sentinel_agent_js::JsAgent;
-use sentinel_agent_protocol::v2::GrpcAgentServerV2;
+use zentinel_agent_js::JsAgent;
+use zentinel_agent_protocol::v2::GrpcAgentServerV2;
 
 /// Command line arguments
 #[derive(Parser, Debug)]
-#[command(name = "sentinel-js-agent")]
-#[command(about = "JavaScript scripting agent for Sentinel reverse proxy (v2 protocol)")]
+#[command(name = "zentinel-js-agent")]
+#[command(about = "JavaScript scripting agent for Zentinel reverse proxy (v2 protocol)")]
 #[command(version)]
 struct Args {
     /// Path to JavaScript script file
@@ -45,14 +45,14 @@ async fn main() -> Result<()> {
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(format!(
-            "{}={},sentinel_agent_protocol=info",
+            "{}={},zentinel_agent_protocol=info",
             env!("CARGO_CRATE_NAME"),
             log_level
         ))
         .json()
         .init();
 
-    info!("Starting Sentinel JavaScript Agent (v2 protocol)");
+    info!("Starting Zentinel JavaScript Agent (v2 protocol)");
 
     // Create agent
     let agent = JsAgent::new(args.script.clone(), args.fail_open)?;
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         .parse()
         .context("Invalid gRPC address format (expected host:port)")?;
 
-    let server = GrpcAgentServerV2::new("sentinel-js-agent", Box::new(agent));
+    let server = GrpcAgentServerV2::new("zentinel-js-agent", Box::new(agent));
 
     info!("JavaScript agent ready and listening on gRPC");
 

@@ -1,6 +1,6 @@
-# sentinel-agent-js
+# zentinel-agent-js
 
-JavaScript scripting agent for [Sentinel](https://github.com/raskell-io/sentinel) reverse proxy. Write custom request/response processing logic in JavaScript.
+JavaScript scripting agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy. Write custom request/response processing logic in JavaScript.
 
 ## Features
 
@@ -16,29 +16,29 @@ JavaScript scripting agent for [Sentinel](https://github.com/raskell-io/sentinel
 ### From crates.io
 
 ```bash
-cargo install sentinel-agent-js
+cargo install zentinel-agent-js
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/raskell-io/sentinel-agent-js
-cd sentinel-agent-js
+git clone https://github.com/zentinelproxy/zentinel-agent-js
+cd zentinel-agent-js
 cargo build --release
 ```
 
 ## Usage
 
 ```bash
-sentinel-js-agent --socket /var/run/sentinel/js.sock \
-  --script /etc/sentinel/scripts/handler.js
+zentinel-js-agent --socket /var/run/zentinel/js.sock \
+  --script /etc/zentinel/scripts/handler.js
 ```
 
 ### Command Line Options
 
 | Option | Environment Variable | Description | Default |
 |--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/sentinel-js.sock` |
+| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-js.sock` |
 | `--script` | `JS_SCRIPT` | JavaScript script file | (required) |
 | `--verbose` | `JS_VERBOSE` | Enable debug logging | `false` |
 | `--fail-open` | `FAIL_OPEN` | Allow requests on script errors | `false` |
@@ -235,14 +235,14 @@ function on_response_headers(response) {
 }
 ```
 
-## Sentinel Proxy Configuration
+## Zentinel Proxy Configuration
 
 ```kdl
 agents {
     agent "js" {
         type "custom"
         transport "unix_socket" {
-            path "/var/run/sentinel/js.sock"
+            path "/var/run/zentinel/js.sock"
         }
         events ["request_headers", "response_headers"]
         timeout-ms 100
@@ -263,9 +263,9 @@ When `--fail-open` is disabled (default), script errors will:
 - Block the request with 500 status
 - Add `js-error` tag to audit metadata
 
-## Comparison with sentinel-agent-lua
+## Comparison with zentinel-agent-lua
 
-| Feature | sentinel-agent-js | sentinel-agent-lua |
+| Feature | zentinel-agent-js | zentinel-agent-lua |
 |---------|------------------|-------------------|
 | Engine | QuickJS | mlua (Lua 5.4) |
 | Scripting | Single script file | Multiple scripts with metadata |
@@ -275,12 +275,12 @@ When `--fail-open` is disabled (default), script errors will:
 | Standard Library | Basic (console) | Rich (JSON, crypto, regex, etc.) |
 | Use Case | Simple scripts | Production workloads |
 
-Use `sentinel-agent-js` for:
+Use `zentinel-agent-js` for:
 - Simple request filtering logic
 - Quick prototyping
 - Lightweight deployments
 
-Use `sentinel-agent-lua` for:
+Use `zentinel-agent-lua` for:
 - Complex processing logic
 - Production environments with strict resource limits
 - Multiple scripts with hot reload

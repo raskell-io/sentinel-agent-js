@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 
-# Sentinel JavaScript Agent Container Image
+# Zentinel JavaScript Agent Container Image
 #
 # Targets:
 #   - prebuilt: For CI with pre-built binaries
@@ -10,16 +10,16 @@
 ################################################################################
 FROM gcr.io/distroless/cc-debian12:nonroot AS prebuilt
 
-COPY sentinel-js-agent /sentinel-js-agent
+COPY zentinel-js-agent /zentinel-js-agent
 
-LABEL org.opencontainers.image.title="Sentinel JavaScript Agent" \
-      org.opencontainers.image.description="Sentinel JavaScript Agent for Sentinel reverse proxy" \
+LABEL org.opencontainers.image.title="Zentinel JavaScript Agent" \
+      org.opencontainers.image.description="Zentinel JavaScript Agent for Zentinel reverse proxy" \
       org.opencontainers.image.vendor="Raskell" \
-      org.opencontainers.image.source="https://github.com/raskell-io/sentinel-agent-js"
+      org.opencontainers.image.source="https://github.com/zentinelproxy/zentinel-agent-js"
 
-ENV RUST_LOG=info,sentinel_js_agent=debug \
-    SOCKET_PATH=/var/run/sentinel/js.sock
+ENV RUST_LOG=info,zentinel_js_agent=debug \
+    SOCKET_PATH=/var/run/zentinel/js.sock
 
 USER nonroot:nonroot
 
-ENTRYPOINT ["/sentinel-js-agent"]
+ENTRYPOINT ["/zentinel-js-agent"]

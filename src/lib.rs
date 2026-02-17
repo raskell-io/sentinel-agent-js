@@ -1,6 +1,6 @@
-//! Sentinel JavaScript Agent Library
+//! Zentinel JavaScript Agent Library
 //!
-//! A scripting agent for Sentinel reverse proxy that allows custom JavaScript
+//! A scripting agent for Zentinel reverse proxy that allows custom JavaScript
 //! logic to inspect and modify HTTP requests and responses.
 //!
 //! Uses QuickJS engine for fast, lightweight JavaScript execution.
@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info, warn};
 
-use sentinel_agent_protocol::v2::{
+use zentinel_agent_protocol::v2::{
     AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, CounterMetric, DrainReason,
     GaugeMetric, HealthStatus, MetricsReport, ShutdownReason,
 };
-use sentinel_agent_protocol::{
+use zentinel_agent_protocol::{
     AgentResponse, AuditMetadata, EventType, HeaderOp, RequestHeadersEvent, ResponseHeadersEvent,
 };
 
@@ -404,7 +404,7 @@ impl AgentHandlerV2 for JsAgent {
     /// Return agent capabilities for v2 protocol.
     fn capabilities(&self) -> AgentCapabilities {
         AgentCapabilities::new(
-            "sentinel-js-agent",
+            "zentinel-js-agent",
             "JavaScript Scripting Agent",
             env!("CARGO_PKG_VERSION"),
         )
@@ -560,13 +560,13 @@ impl AgentHandlerV2 for JsAgent {
 
     /// Return current health status.
     fn health_status(&self) -> HealthStatus {
-        let agent_id = "sentinel-js-agent".to_string();
+        let agent_id = "zentinel-js-agent".to_string();
 
         // If draining, report as draining
         if self.is_draining() {
             return HealthStatus {
                 agent_id,
-                state: sentinel_agent_protocol::v2::HealthState::Draining { eta_ms: None },
+                state: zentinel_agent_protocol::v2::HealthState::Draining { eta_ms: None },
                 message: Some("Agent is draining".to_string()),
                 load: None,
                 resources: None,
@@ -580,7 +580,7 @@ impl AgentHandlerV2 for JsAgent {
 
     /// Return metrics report.
     fn metrics_report(&self) -> Option<MetricsReport> {
-        let mut report = MetricsReport::new("sentinel-js-agent", 10_000);
+        let mut report = MetricsReport::new("zentinel-js-agent", 10_000);
 
         report.counters.push(CounterMetric::new(
             "js_agent_requests_total",

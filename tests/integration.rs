@@ -3,9 +3,9 @@
 //! These tests directly invoke the handler methods to verify the JavaScript
 //! scripting logic works correctly with the v2 protocol.
 
-use sentinel_agent_js::JsAgent;
-use sentinel_agent_protocol::v2::{AgentHandlerV2, DrainReason, ShutdownReason};
-use sentinel_agent_protocol::{Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata, ResponseHeadersEvent};
+use zentinel_agent_js::JsAgent;
+use zentinel_agent_protocol::v2::{AgentHandlerV2, DrainReason, ShutdownReason};
+use zentinel_agent_protocol::{Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata, ResponseHeadersEvent};
 use std::collections::HashMap;
 
 /// Create a basic request metadata
@@ -81,7 +81,7 @@ fn test_capabilities() {
     let agent = JsAgent::from_source(script.to_string(), false).expect("Failed to create agent");
 
     let caps = agent.capabilities();
-    assert_eq!(caps.agent_id, "sentinel-js-agent");
+    assert_eq!(caps.agent_id, "zentinel-js-agent");
     assert_eq!(caps.name, "JavaScript Scripting Agent");
     assert!(caps.supports_event(EventType::RequestHeaders));
     assert!(caps.supports_event(EventType::ResponseHeaders));
@@ -97,7 +97,7 @@ fn test_health_status() {
 
     let health = agent.health_status();
     assert!(health.is_healthy());
-    assert_eq!(health.agent_id, "sentinel-js-agent");
+    assert_eq!(health.agent_id, "zentinel-js-agent");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn test_metrics_report() {
     let report = agent.metrics_report();
     assert!(report.is_some());
     let report = report.unwrap();
-    assert_eq!(report.agent_id, "sentinel-js-agent");
+    assert_eq!(report.agent_id, "zentinel-js-agent");
     assert!(!report.counters.is_empty());
     assert!(!report.gauges.is_empty());
 }
