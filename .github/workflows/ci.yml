@@ -1,12 +1,10 @@
 name: CI
 
 on:
-  # Disabled to conserve GHA minutes
-  # Uncomment to enable:
-  # push:
-  #   branches: [main]
-  # pull_request:
-  #   branches: [main]
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -17,7 +15,6 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    if: false  # Disabled - change to true to enable
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +38,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    if: false  # Disabled - change to true to enable
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +61,6 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
-    if: false  # Disabled - change to true to enable
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +75,6 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    if: false  # Disabled - change to true to enable
     steps:
       - uses: actions/checkout@v4
 

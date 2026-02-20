@@ -17,11 +17,15 @@ use tracing::{debug, error, info, warn};
 
 use zentinel_agent_protocol::v2::{
     AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, CounterMetric, DrainReason,
-    GaugeMetric, HealthStatus, MetricsReport, ShutdownReason,
+    GaugeMetric, HealthStatus, LoadMetrics, MetricsReport, ShutdownReason,
 };
 use zentinel_agent_protocol::{
-    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestHeadersEvent, ResponseHeadersEvent,
+    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestHeadersEvent,
+    ResponseBodyChunkEvent, ResponseHeadersEvent, WebSocketFrameEvent,
 };
+
+/// Default memory limit: 64MB
+const DEFAULT_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Agent configuration from the proxy
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -32,6 +36,8 @@ pub struct JsConfigJson {
     /// Whether to fail open on errors
     #[serde(default)]
     pub fail_open: bool,
+    /// Maximum memory in bytes for the JS runtime (default: 64MB)
+    pub max_memory: Option<usize>,
 }
 
 /// Result from JavaScript script execution
@@ -77,18 +83,26 @@ pub struct JsResponse {
 pub struct JsAgent {
     /// JavaScript runtime
     runtime: Arc<RwLock<Runtime>>,
+    /// Cached JS context with pre-evaluated script
+    cached_context: RwLock<Option<JsContext>>,
     /// Script content (can be reconfigured)
     script_content: RwLock<String>,
     /// Whether to fail open on errors (can be reconfigured)
     fail_open: RwLock<bool>,
     /// Whether the agent is draining (not accepting new requests)
     draining: RwLock<bool>,
+    /// Memory limit for JS runtime in bytes
+    memory_limit: RwLock<usize>,
     /// Metrics: total requests processed
     requests_total: AtomicU64,
+    /// Metrics: total requests allowed
+    requests_allowed: AtomicU64,
     /// Metrics: total requests blocked
     requests_blocked: AtomicU64,
     /// Metrics: total script errors
     script_errors: AtomicU64,
+    /// Metrics: currently in-flight requests
+    requests_in_flight: AtomicU64,
 }
 
 // Safety: We protect the runtime with an RwLock
@@ -107,17 +121,29 @@ impl JsAgent {
     /// Create a new JavaScript agent from script source code
     pub fn from_source(script_content: String, fail_open: bool) -> Result<Self> {
         let runtime = Runtime::new().context("Failed to create JavaScript runtime")?;
+        runtime.set_memory_limit(DEFAULT_MEMORY_LIMIT);
 
-        info!("JavaScript agent initialized");
+        // Create and cache a context with the script pre-evaluated
+        let ctx = JsContext::full(&runtime).context("Failed to create JS context")?;
+        Self::setup_context_and_eval(&ctx, &script_content)?;
+
+        info!(
+            memory_limit_mb = DEFAULT_MEMORY_LIMIT / (1024 * 1024),
+            "JavaScript agent initialized with cached context"
+        );
 
         Ok(Self {
             runtime: Arc::new(RwLock::new(runtime)),
+            cached_context: RwLock::new(Some(ctx)),
             script_content: RwLock::new(script_content),
             fail_open: RwLock::new(fail_open),
             draining: RwLock::new(false),
+            memory_limit: RwLock::new(DEFAULT_MEMORY_LIMIT),
             requests_total: AtomicU64::new(0),
+            requests_allowed: AtomicU64::new(0),
             requests_blocked: AtomicU64::new(0),
             script_errors: AtomicU64::new(0),
+            requests_in_flight: AtomicU64::new(0),
         })
     }
 
@@ -126,17 +152,76 @@ impl JsAgent {
         *self.draining.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Set up console object and evaluate script in a context.
+    fn setup_context_and_eval(ctx: &JsContext, script: &str) -> Result<()> {
+        ctx.with(|ctx| {
+            let console = Object::new(ctx.clone())?;
+
+            let log_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
+                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
+                info!(target: "js_console", "{}", msg.join(" "));
+            })?;
+            console.set("log", log_fn)?;
+
+            let warn_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
+                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
+                warn!(target: "js_console", "{}", msg.join(" "));
+            })?;
+            console.set("warn", warn_fn)?;
+
+            let error_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
+                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
+                error!(target: "js_console", "{}", msg.join(" "));
+            })?;
+            console.set("error", error_fn)?;
+
+            let globals = ctx.globals();
+            globals.set("console", console)?;
+
+            ctx.eval::<(), _>(script)?;
+
+            Ok::<_, rquickjs::Error>(())
+        })
+        .map_err(|e: rquickjs::Error| anyhow::anyhow!("Failed to evaluate script: {}", e))
+    }
+
+    /// Rebuild the cached context with the current script content.
+    fn rebuild_cached_context(&self) -> Result<()> {
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        let script_content = self
+            .script_content
+            .read()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        let ctx = JsContext::full(&runtime).context("Failed to create JS context")?;
+        Self::setup_context_and_eval(&ctx, &script_content)?;
+
+        let mut cached = self
+            .cached_context
+            .write()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        *cached = Some(ctx);
+
+        Ok(())
+    }
+
     /// Reconfigure the agent with new settings
     ///
     /// This allows dynamic reconfiguration without restarting the agent.
+    /// Rebuilds the cached JS context when the script changes.
     pub fn reconfigure(&self, config: JsConfigJson) -> Result<()> {
+        let script_changed = config.script.is_some();
+
         if let Some(script) = config.script {
             let mut script_content = self
                 .script_content
                 .write()
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             *script_content = script;
-            info!("JavaScript agent script reconfigured");
         }
 
         {
@@ -145,6 +230,29 @@ impl JsAgent {
                 .write()
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             *fail_open = config.fail_open;
+        }
+
+        // Update memory limit if specified
+        if let Some(max_mem) = config.max_memory {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            runtime.set_memory_limit(max_mem);
+
+            let mut limit = self
+                .memory_limit
+                .write()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            *limit = max_mem;
+
+            info!(memory_limit_mb = max_mem / (1024 * 1024), "Memory limit updated");
+        }
+
+        // Rebuild cached context if script changed
+        if script_changed {
+            self.rebuild_cached_context()?;
+            info!("JavaScript agent script reconfigured (context rebuilt)");
         }
 
         Ok(())
@@ -226,53 +334,38 @@ impl JsAgent {
         }
     }
 
-    /// Execute a JavaScript function
+    /// Execute a JavaScript function using the cached context.
+    ///
+    /// Falls back to creating a fresh context if the cache is empty.
     pub fn call_function(
         &self,
         fn_name: &str,
         arg: serde_json::Value,
     ) -> Result<Option<ScriptResult>> {
-        let runtime = self
-            .runtime
+        // Try to ensure context exists
+        {
+            let cached = self
+                .cached_context
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            if cached.is_none() {
+                drop(cached);
+                self.rebuild_cached_context()?;
+            }
+        }
+
+        let cached = self
+            .cached_context
             .read()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
-        let script_content = self
-            .script_content
-            .read()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let ctx_ref = cached
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No cached context available"))?;
 
-        let ctx = JsContext::full(&runtime).context("Failed to create JS context")?;
-
-        ctx.with(|ctx| {
-            // Set up console object
-            let console = Object::new(ctx.clone())?;
-
-            let log_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
-                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
-                info!(target: "js_console", "{}", msg.join(" "));
-            })?;
-            console.set("log", log_fn)?;
-
-            let warn_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
-                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
-                warn!(target: "js_console", "{}", msg.join(" "));
-            })?;
-            console.set("warn", warn_fn)?;
-
-            let error_fn = Function::new(ctx.clone(), |args: rquickjs::function::Rest<Value>| {
-                let msg: Vec<String> = args.iter().map(|v| format!("{:?}", v)).collect();
-                error!(target: "js_console", "{}", msg.join(" "));
-            })?;
-            console.set("error", error_fn)?;
-
+        ctx_ref.with(|ctx| {
+            // Check if function exists (already defined from cached script eval)
             let globals = ctx.globals();
-            globals.set("console", console)?;
-
-            // Execute the script to define functions
-            ctx.eval::<(), _>(script_content.as_str())?;
-
-            // Check if function exists
             let func: Option<Function> = globals.get(fn_name).ok();
 
             let Some(func) = func else {
@@ -409,10 +502,13 @@ impl AgentHandlerV2 for JsAgent {
             env!("CARGO_PKG_VERSION"),
         )
         .with_event(EventType::RequestHeaders)
+        .with_event(EventType::RequestBodyChunk)
         .with_event(EventType::ResponseHeaders)
+        .with_event(EventType::ResponseBodyChunk)
+        .with_event(EventType::WebSocketFrame)
         .with_features(AgentFeatures {
-            streaming_body: false,
-            websocket: false,
+            streaming_body: true,
+            websocket: true,
             guardrails: false,
             config_push: true,
             metrics_export: true,
@@ -425,7 +521,7 @@ impl AgentHandlerV2 for JsAgent {
             max_body_size: 10 * 1024 * 1024, // 10MB
             max_concurrency: 100,
             preferred_chunk_size: 64 * 1024, // 64KB
-            max_memory: None,
+            max_memory: Some(*self.memory_limit.read().unwrap_or_else(|e| e.into_inner())),
             max_processing_time_ms: Some(5000),
         })
     }
@@ -459,10 +555,13 @@ impl AgentHandlerV2 for JsAgent {
     /// Handle request headers event.
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.requests_in_flight.fetch_add(1, Ordering::Relaxed);
 
         // Check if draining
         if self.is_draining() {
             debug!("Agent is draining, allowing request");
+            self.requests_in_flight.fetch_sub(1, Ordering::Relaxed);
+            self.requests_allowed.fetch_add(1, Ordering::Relaxed);
             return AgentResponse::default_allow();
         }
 
@@ -484,13 +583,16 @@ impl AgentHandlerV2 for JsAgent {
 
         let request_json = match serde_json::to_value(&request) {
             Ok(v) => v,
-            Err(e) => return self.handle_error(e.into(), &correlation_id),
+            Err(e) => {
+                self.requests_in_flight.fetch_sub(1, Ordering::Relaxed);
+                return self.handle_error(e.into(), &correlation_id);
+            }
         };
 
         // Call JavaScript function (blocking - QuickJS is fast)
         let result = self.call_function("on_request_headers", request_json);
 
-        match result {
+        let response = match result {
             Ok(Some(script_result)) => {
                 debug!(
                     correlation_id = correlation_id,
@@ -498,20 +600,26 @@ impl AgentHandlerV2 for JsAgent {
                     "Script returned result"
                 );
                 let response = Self::build_response(script_result.clone());
-                // Track blocked requests
+                // Track blocked/allowed requests
                 if script_result.decision.to_lowercase() == "block"
                     || script_result.decision.to_lowercase() == "deny"
                 {
                     self.requests_blocked.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.requests_allowed.fetch_add(1, Ordering::Relaxed);
                 }
                 response
             }
             Ok(None) => {
                 // Function not defined, allow by default
+                self.requests_allowed.fetch_add(1, Ordering::Relaxed);
                 AgentResponse::default_allow()
             }
             Err(e) => self.handle_error(e, &correlation_id),
-        }
+        };
+
+        self.requests_in_flight.fetch_sub(1, Ordering::Relaxed);
+        response
     }
 
     /// Handle response headers event.
@@ -558,6 +666,86 @@ impl AgentHandlerV2 for JsAgent {
         }
     }
 
+    /// Handle request body chunk event.
+    async fn on_request_body_chunk(&self, event: RequestBodyChunkEvent) -> AgentResponse {
+        if self.is_draining() {
+            return AgentResponse::default_allow();
+        }
+
+        let correlation_id = event.correlation_id.clone();
+
+        let chunk_json = serde_json::json!({
+            "correlation_id": event.correlation_id,
+            "data": event.data,
+            "is_last": event.is_last,
+            "total_size": event.total_size,
+            "chunk_index": event.chunk_index,
+            "bytes_received": event.bytes_received,
+        });
+
+        let result = self.call_function("on_request_body_chunk", chunk_json);
+
+        match result {
+            Ok(Some(script_result)) => Self::build_response(script_result),
+            Ok(None) => AgentResponse::default_allow(),
+            Err(e) => self.handle_error(e, &correlation_id),
+        }
+    }
+
+    /// Handle response body chunk event.
+    async fn on_response_body_chunk(&self, event: ResponseBodyChunkEvent) -> AgentResponse {
+        if self.is_draining() {
+            return AgentResponse::default_allow();
+        }
+
+        let correlation_id = event.correlation_id.clone();
+
+        let chunk_json = serde_json::json!({
+            "correlation_id": event.correlation_id,
+            "data": event.data,
+            "is_last": event.is_last,
+            "total_size": event.total_size,
+            "chunk_index": event.chunk_index,
+            "bytes_sent": event.bytes_sent,
+        });
+
+        let result = self.call_function("on_response_body_chunk", chunk_json);
+
+        match result {
+            Ok(Some(script_result)) => Self::build_response(script_result),
+            Ok(None) => AgentResponse::default_allow(),
+            Err(e) => self.handle_error(e, &correlation_id),
+        }
+    }
+
+    /// Handle WebSocket frame event.
+    async fn on_websocket_frame(&self, event: WebSocketFrameEvent) -> AgentResponse {
+        if self.is_draining() {
+            return AgentResponse::websocket_allow();
+        }
+
+        let correlation_id = event.correlation_id.clone();
+
+        let frame_json = serde_json::json!({
+            "correlation_id": event.correlation_id,
+            "opcode": event.opcode,
+            "data": event.data,
+            "client_to_server": event.client_to_server,
+            "frame_index": event.frame_index,
+            "fin": event.fin,
+            "route_id": event.route_id,
+            "client_ip": event.client_ip,
+        });
+
+        let result = self.call_function("on_websocket_frame", frame_json);
+
+        match result {
+            Ok(Some(script_result)) => Self::build_response(script_result),
+            Ok(None) => AgentResponse::websocket_allow(),
+            Err(e) => self.handle_error(e, &correlation_id),
+        }
+    }
+
     /// Return current health status.
     fn health_status(&self) -> HealthStatus {
         let agent_id = "zentinel-js-agent".to_string();
@@ -575,16 +763,76 @@ impl AgentHandlerV2 for JsAgent {
             };
         }
 
-        HealthStatus::healthy(agent_id)
+        let total = self.requests_total.load(Ordering::Relaxed);
+        let errors = self.script_errors.load(Ordering::Relaxed);
+        let in_flight = self.requests_in_flight.load(Ordering::Relaxed);
+        let blocked = self.requests_blocked.load(Ordering::Relaxed);
+
+        // Detect degraded state when error rate > 10%
+        let error_rate = if total > 0 {
+            errors as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        let load = Some(LoadMetrics {
+            in_flight: in_flight as u32,
+            queue_depth: 0,
+            avg_latency_ms: 0.0,
+            p50_latency_ms: 0.0,
+            p95_latency_ms: 0.0,
+            p99_latency_ms: 0.0,
+            requests_processed: total,
+            requests_rejected: blocked,
+            requests_timed_out: 0,
+        });
+
+        if total > 100 && error_rate > 0.1 {
+            HealthStatus {
+                agent_id,
+                state: zentinel_agent_protocol::v2::HealthState::Degraded {
+                    disabled_features: vec!["script_execution".to_string()],
+                    timeout_multiplier: 1.5,
+                },
+                message: Some(format!(
+                    "High error rate: {:.1}% ({} errors / {} total)",
+                    error_rate * 100.0,
+                    errors,
+                    total,
+                )),
+                load,
+                resources: None,
+                valid_until_ms: None,
+                timestamp_ms: now_ms(),
+            }
+        } else {
+            HealthStatus {
+                agent_id,
+                state: zentinel_agent_protocol::v2::HealthState::Healthy,
+                message: None,
+                load,
+                resources: None,
+                valid_until_ms: None,
+                timestamp_ms: now_ms(),
+            }
+        }
     }
 
     /// Return metrics report.
     fn metrics_report(&self) -> Option<MetricsReport> {
         let mut report = MetricsReport::new("zentinel-js-agent", 10_000);
 
+        let total = self.requests_total.load(Ordering::Relaxed);
+        let errors = self.script_errors.load(Ordering::Relaxed);
+
         report.counters.push(CounterMetric::new(
             "js_agent_requests_total",
-            self.requests_total.load(Ordering::Relaxed),
+            total,
+        ));
+
+        report.counters.push(CounterMetric::new(
+            "js_agent_requests_allowed_total",
+            self.requests_allowed.load(Ordering::Relaxed),
         ));
 
         report.counters.push(CounterMetric::new(
@@ -594,10 +842,24 @@ impl AgentHandlerV2 for JsAgent {
 
         report.counters.push(CounterMetric::new(
             "js_agent_script_errors_total",
-            self.script_errors.load(Ordering::Relaxed),
+            errors,
         ));
 
-        // Add gauge for draining state
+        // Gauges
+        let error_rate = if total > 0 {
+            errors as f64 / total as f64
+        } else {
+            0.0
+        };
+        report
+            .gauges
+            .push(GaugeMetric::new("js_agent_error_rate", error_rate));
+
+        report.gauges.push(GaugeMetric::new(
+            "js_agent_in_flight",
+            self.requests_in_flight.load(Ordering::Relaxed) as f64,
+        ));
+
         let draining_value = if self.is_draining() { 1.0 } else { 0.0 };
         report
             .gauges
