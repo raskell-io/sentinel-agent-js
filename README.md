@@ -241,10 +241,8 @@ function on_response_headers(response) {
 agents {
     agent "js" {
         type "custom"
-        transport "unix_socket" {
-            path "/var/run/zentinel/js.sock"
-        }
-        events ["request_headers", "response_headers"]
+        unix-socket "/var/run/zentinel/js.sock"
+        events "request_headers" "response_headers"
         timeout-ms 100
         failure-mode "open"
     }
