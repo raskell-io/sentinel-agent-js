@@ -13,13 +13,25 @@ JavaScript scripting agent for [Zentinel](https://github.com/zentinelproxy/zenti
 
 ## Installation
 
-### From crates.io
+### Using Bundle (Recommended)
+
+```bash
+# Install just this agent
+zentinel bundle install js
+
+# Or install all bundled agents
+zentinel bundle install
+```
+
+The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://zentinelproxy.io/docs/deployment/bundle/) for details.
+
+### Using Cargo
 
 ```bash
 cargo install zentinel-agent-js
 ```
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/zentinelproxy/zentinel-agent-js
@@ -241,7 +253,9 @@ function on_response_headers(response) {
 agents {
     agent "js" {
         type "custom"
-        unix-socket "/var/run/zentinel/js.sock"
+        transport "unix_socket" {
+            path "/var/run/zentinel/js.sock"
+        }
         events "request_headers" "response_headers"
         timeout-ms 100
         failure-mode "open"
