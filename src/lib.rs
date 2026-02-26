@@ -246,7 +246,10 @@ impl JsAgent {
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             *limit = max_mem;
 
-            info!(memory_limit_mb = max_mem / (1024 * 1024), "Memory limit updated");
+            info!(
+                memory_limit_mb = max_mem / (1024 * 1024),
+                "Memory limit updated"
+            );
         }
 
         // Rebuild cached context if script changed
@@ -363,42 +366,43 @@ impl JsAgent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No cached context available"))?;
 
-        ctx_ref.with(|ctx| {
-            // Check if function exists (already defined from cached script eval)
-            let globals = ctx.globals();
-            let func: Option<Function> = globals.get(fn_name).ok();
+        ctx_ref
+            .with(|ctx| {
+                // Check if function exists (already defined from cached script eval)
+                let globals = ctx.globals();
+                let func: Option<Function> = globals.get(fn_name).ok();
 
-            let Some(func) = func else {
-                debug!(function = fn_name, "Function not defined in script");
-                return Ok(None);
-            };
+                let Some(func) = func else {
+                    debug!(function = fn_name, "Function not defined in script");
+                    return Ok(None);
+                };
 
-            // Convert argument to JS value
-            let js_arg = Self::json_to_js(&ctx, &arg)?;
+                // Convert argument to JS value
+                let js_arg = Self::json_to_js(&ctx, &arg)?;
 
-            // Call the function
-            let result: Value = func.call((js_arg,))?;
+                // Call the function
+                let result: Value = func.call((js_arg,))?;
 
-            // Convert result to ScriptResult
-            let json_result = Self::js_to_json(&result);
+                // Convert result to ScriptResult
+                let json_result = Self::js_to_json(&result);
 
-            if json_result.is_null() {
-                return Ok(Some(ScriptResult {
-                    decision: "allow".to_string(),
-                    ..Default::default()
-                }));
-            }
+                if json_result.is_null() {
+                    return Ok(Some(ScriptResult {
+                        decision: "allow".to_string(),
+                        ..Default::default()
+                    }));
+                }
 
-            let script_result: ScriptResult =
-                serde_json::from_value(json_result).map_err(|e| rquickjs::Error::FromJs {
-                    from: "object",
-                    to: "ScriptResult",
-                    message: Some(format!("Failed to parse result: {}", e)),
-                })?;
+                let script_result: ScriptResult =
+                    serde_json::from_value(json_result).map_err(|e| rquickjs::Error::FromJs {
+                        from: "object",
+                        to: "ScriptResult",
+                        message: Some(format!("Failed to parse result: {}", e)),
+                    })?;
 
-            Ok(Some(script_result))
-        })
-        .map_err(|e: rquickjs::Error| anyhow::anyhow!("JavaScript error: {}", e))
+                Ok(Some(script_result))
+            })
+            .map_err(|e: rquickjs::Error| anyhow::anyhow!("JavaScript error: {}", e))
     }
 
     /// Build AgentResponse from ScriptResult
@@ -825,10 +829,9 @@ impl AgentHandlerV2 for JsAgent {
         let total = self.requests_total.load(Ordering::Relaxed);
         let errors = self.script_errors.load(Ordering::Relaxed);
 
-        report.counters.push(CounterMetric::new(
-            "js_agent_requests_total",
-            total,
-        ));
+        report
+            .counters
+            .push(CounterMetric::new("js_agent_requests_total", total));
 
         report.counters.push(CounterMetric::new(
             "js_agent_requests_allowed_total",
@@ -840,10 +843,9 @@ impl AgentHandlerV2 for JsAgent {
             self.requests_blocked.load(Ordering::Relaxed),
         ));
 
-        report.counters.push(CounterMetric::new(
-            "js_agent_script_errors_total",
-            errors,
-        ));
+        report
+            .counters
+            .push(CounterMetric::new("js_agent_script_errors_total", errors));
 
         // Gauges
         let error_rate = if total > 0 {

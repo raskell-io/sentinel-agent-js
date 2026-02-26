@@ -3,10 +3,12 @@
 //! These tests directly invoke the handler methods to verify the JavaScript
 //! scripting logic works correctly with the v2 protocol.
 
+use std::collections::HashMap;
 use zentinel_agent_js::JsAgent;
 use zentinel_agent_protocol::v2::{AgentHandlerV2, DrainReason, ShutdownReason};
-use zentinel_agent_protocol::{Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata, ResponseHeadersEvent};
-use std::collections::HashMap;
+use zentinel_agent_protocol::{
+    Decision, EventType, HeaderOp, RequestHeadersEvent, RequestMetadata, ResponseHeadersEvent,
+};
 
 /// Create a basic request metadata
 fn make_metadata() -> RequestMetadata {
@@ -611,7 +613,10 @@ async fn test_on_drain() {
     // Requests while draining should still be allowed
     let event = make_request_headers("GET", "/api", HashMap::new());
     let response = agent.on_request_headers(event).await;
-    assert!(is_allow(&response.decision), "Expected Allow while draining");
+    assert!(
+        is_allow(&response.decision),
+        "Expected Allow while draining"
+    );
 }
 
 // ============================================================================
